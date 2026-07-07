@@ -4,6 +4,10 @@ import morgan from 'morgan';
 
 import { env } from './config/env.js';
 import { errorHandler } from './middleware/error-handler.js';
+import {
+  jsonBodyParser,
+  serverlessJsonBody,
+} from './middleware/serverless-body.js';
 import routes from './routes/index.js';
 
 export function createApp() {
@@ -21,7 +25,8 @@ export function createApp() {
       credentials: true,
     }),
   );
-  app.use(express.json());
+  app.use(serverlessJsonBody);
+  app.use(jsonBodyParser);
   app.use(morgan(env.nodeEnv === 'production' ? 'combined' : 'dev'));
 
   app.use('/api', routes);
