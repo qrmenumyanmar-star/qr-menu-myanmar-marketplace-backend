@@ -1,0 +1,338 @@
+import { Router } from 'express';
+
+import { env } from '../config/env.js';
+import { authMiddleware } from '../middleware/auth.js';
+import {
+  createOdooContact,
+  fetchOdooContactById,
+  fetchOdooContacts,
+  fetchOdooPartnerCategoryNames,
+  fetchOdooPartnerTags,
+  fetchOdooTownshipForPartner,
+  fetchOdooTownships,
+  resolvePartnerLocation,
+  searchOdooContactsByPhone,
+} from '../services/odoo.service.js';
+import { splitTagNames, validateMyanmarPhone } from '../utils/myanmar-phone.js';
+import { AuthRequest } from '../types/auth.js';
+
+const router = Router();
+
+function toStringValue(value: unknown): string {
+  if (value === false || value === null || value === undefined) {
+    return '';
+  }
+  return String(value);
+}
+
+function toNumberValue(value: unknown): number {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+/** Odoo many2one fields come back as [id, "Display Name"] (or false). */
+function toRelationName(value: unknown): string {
+  if (Array.isArray(value)) {
+    return toStringValue(value[1]);
+  }
+  return toStringValue(value);
+}
+
+function toRelationId(value: unknown): number {
+  if (Array.isArray(value) && typeof value[0] === 'number') {
+    return value[0];
+  }
+  return 0;
+}
+
+function toManyIds(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is number => typeof item === 'number');
+}
+
+router.use(authMiddleware);
+
+router.get('/', async (req: AuthRequest, res) => {
+  try {
+    const contacts = await fetchOdooContacts(req.user!.id);
+
+    const data = contacts.map(contact => {
+      const extra: Record<string, string> = {};
+      for (const field of env.odooContactExtraFields) {
+        extra[field] = toStringValue(contact[field]);
+      }
+
+      return {
+        id: String(contact.id),
+        name: contact.name,
+        email: toStringValue(contact.email),
+        phone: toStringValue(contact.phone),
+        city: toStringValue(contact.city),
+        jobPosition: toStringValue(contact.function),
+        company: toRelationName(contact.parent_id),
+        isCompany: Boolean(contact.is_company),
+        activity: toStringValue(contact.x_studio_monthly_activity),
+        township: toRelationName(contact.x_studio_many2one_field_8u9_1jp4l7r0g),
+        status: toStringValue(contact.x_studio_customer_status),
+        lastMonthSales: toNumberValue(contact.x_studio_last_month_sales),
+        thisMonthSales: toNumberValue(contact.x_studio_this_month_sales),
+        thisMonthPercent: toNumberValue(contact.x_studio_this_month_percent),
+        lastInvoiceDate: toStringValue(contact.x_studio_last_invoice_date),
+        expoPushToken: toStringValue(contact.x_studio_expo_push_token),
+        extra,
+      };
+    });
+
+    return res.json({ data });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to load contacts.';
+    console.error('[customers] Failed to load contacts:', message);
+    return res.status(500).json({ message });
+  }
+});
+
+router.get('/townships', async (req: AuthRequest, res) => {
+  try {
+    const townships = await fetchOdooTownships(req.user!.id);
+
+    const data = townships
+      .map(township => ({
+        id: String(township.id),
+        name: toStringValue(township.x_name),
+      }))
+      .filter(township => township.name);
+
+    return res.json({ data });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to load townships.';
+    console.error('[customers] Failed to load townships:', message);
+    return res.status(500).json({ message });
+  }
+});
+
+router.get('/tags', async (req: AuthRequest, res) => {
+  try {
+    const tags = await fetchOdooPartnerTags(req.user!.id);
+
+    const data = tags.map(tag => ({
+      id: String(tag.id),
+      name: toStringValue(tag.name),
+    }));
+
+    return res.json({ data });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to load contact tags.';
+    console.error('[customers] Failed to load contact tags:', message);
+    return res.status(500).json({ message });
+  }
+});
+
+router.get('/search', async (req: AuthRequest, res) => {
+  const phone = toStringValue(req.query.phone).trim();
+
+  if (!phone) {
+    return res.status(400).json({ message: 'Phone number is required.' });
+  }
+
+  try {
+    validateMyanmarPhone(phone, 'Phone number');
+    const contacts = await searchOdooContactsByPhone(req.user!.id, phone);
+
+    const data = contacts.map(contact => ({
+      id: String(contact.id),
+      name: toStringValue(contact.name),
+      phone: toStringValue(contact.phone),
+      street: toStringValue(contact.street),
+      street2: toStringValue(contact.street2),
+      city: toStringValue(contact.city),
+      township: toRelationName(contact.x_studio_many2one_field_8u9_1jp4l7r0g),
+    }));
+
+    return res.json({ data });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to search contacts.';
+    console.error('[customers] Failed to search contacts:', message);
+    return res.status(400).json({ message });
+  }
+});
+
+router.post('/', async (req: AuthRequest, res) => {
+  const name = toStringValue(req.body?.name).trim();
+  const email = toStringValue(req.body?.email).trim();
+  const phoneRaw = toStringValue(req.body?.phone).trim();
+  const street = toStringValue(req.body?.street).trim();
+  const street2 = toStringValue(req.body?.street2).trim();
+  const tagsRaw = toStringValue(req.body?.tags).trim();
+  const townshipId = Number(req.body?.townshipId);
+
+  if (!name) {
+    return res.status(400).json({ message: 'Name is required.' });
+  }
+
+  if (!phoneRaw) {
+    return res.status(400).json({ message: 'Phone number is required.' });
+  }
+
+  if (!Number.isFinite(townshipId) || townshipId <= 0) {
+    return res.status(400).json({ message: 'Township is required.' });
+  }
+
+  let phone = phoneRaw;
+
+  try {
+    phone = validateMyanmarPhone(phoneRaw, 'Phone number');
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Invalid phone number.';
+    return res.status(400).json({ message });
+  }
+
+  try {
+    const existing = await searchOdooContactsByPhone(req.user!.id, phone);
+    if (existing.length > 0) {
+      return res.status(409).json({
+        message:
+          'A contact with this phone number already exists. Open the existing contact instead of creating a new one.',
+        data: existing.map(contact => ({
+          id: String(contact.id),
+          name: toStringValue(contact.name),
+          phone: toStringValue(contact.phone),
+          street: toStringValue(contact.street),
+          street2: toStringValue(contact.street2),
+          city: toStringValue(contact.city),
+          township: toRelationName(contact.x_studio_many2one_field_8u9_1jp4l7r0g),
+        })),
+      });
+    }
+
+    const created = await createOdooContact(req.user!.id, {
+      name,
+      email: email || undefined,
+      phone,
+      street: street || undefined,
+      street2: street2 || undefined,
+      townshipId,
+      tagNames: splitTagNames(tagsRaw),
+    });
+
+    const contacts = await fetchOdooContacts(req.user!.id);
+    const contact = contacts.find(item => item.id === created.id);
+
+    if (!contact) {
+      return res.status(201).json({
+        data: {
+          id: String(created.id),
+          name: created.name,
+          email,
+          phone,
+          city: '',
+          jobPosition: '',
+          company: '',
+          isCompany: false,
+          activity: '',
+          township: '',
+          status: '',
+          lastMonthSales: 0,
+          thisMonthSales: 0,
+          thisMonthPercent: 0,
+          lastInvoiceDate: '',
+          expoPushToken: '',
+          extra: {},
+        },
+      });
+    }
+
+    const extra: Record<string, string> = {};
+    for (const field of env.odooContactExtraFields) {
+      extra[field] = toStringValue(contact[field]);
+    }
+
+    return res.status(201).json({
+      data: {
+        id: String(contact.id),
+        name: contact.name,
+        email: toStringValue(contact.email),
+        phone: toStringValue(contact.phone),
+        city: toStringValue(contact.city),
+        jobPosition: toStringValue(contact.function),
+        company: toRelationName(contact.parent_id),
+        isCompany: Boolean(contact.is_company),
+        activity: toStringValue(contact.x_studio_monthly_activity),
+        township: toRelationName(contact.x_studio_many2one_field_8u9_1jp4l7r0g),
+        status: toStringValue(contact.x_studio_customer_status),
+        lastMonthSales: toNumberValue(contact.x_studio_last_month_sales),
+        thisMonthSales: toNumberValue(contact.x_studio_this_month_sales),
+        thisMonthPercent: toNumberValue(contact.x_studio_this_month_percent),
+        lastInvoiceDate: toStringValue(contact.x_studio_last_invoice_date),
+        expoPushToken: toStringValue(contact.x_studio_expo_push_token),
+        extra,
+      },
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to create contact.';
+    console.error('[customers] Failed to create contact:', message);
+    return res.status(500).json({ message });
+  }
+});
+
+router.get('/:id', async (req: AuthRequest, res) => {
+  const contactId = Number(req.params.id);
+
+  if (!Number.isFinite(contactId) || contactId <= 0) {
+    return res.status(400).json({ message: 'Invalid contact id.' });
+  }
+
+  try {
+    const contact = await fetchOdooContactById(req.user!.id, contactId);
+
+    if (!contact) {
+      return res.status(404).json({ message: 'Contact not found.' });
+    }
+
+    const [tagNames, township] = await Promise.all([
+      fetchOdooPartnerCategoryNames(
+        req.user!.id,
+        toManyIds(contact.category_id),
+      ),
+      fetchOdooTownshipForPartner(req.user!.id, contact),
+    ]);
+
+    const location = resolvePartnerLocation(contact, township);
+
+    const data = {
+      id: String(contact.id),
+      name: toStringValue(contact.name),
+      relatedCompany: toRelationName(contact.parent_id),
+      relatedCompanyId: toRelationId(contact.parent_id) || null,
+      email: toStringValue(contact.email),
+      phone: toStringValue(contact.phone),
+      street: toStringValue(contact.street),
+      street2: toStringValue(contact.street2),
+      township: location.township,
+      city: location.city,
+      state: location.state,
+      stateId: location.stateId,
+      zip: location.zip,
+      country: location.country,
+      countryId: location.countryId,
+      tags: tagNames.join(', '),
+      memberCode: toStringValue(contact.x_studio_member_code),
+    };
+
+    return res.json({ data });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to load contact detail.';
+    console.error('[customers] Failed to load contact detail:', message);
+    return res.status(500).json({ message });
+  }
+});
+
+export default router;
