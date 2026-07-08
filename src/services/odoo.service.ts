@@ -522,6 +522,7 @@ export type CreateQuotationInput = {
   deliveryNotes?: string;
   preferredDeliveryDate?: string;
   phoneNumber?: string;
+  paymentMethodLineId?: number;
   lines: CreateQuotationLineInput[];
 };
 
@@ -574,6 +575,14 @@ export async function createOdooQuotation(
   const phoneNumber = input.phoneNumber?.trim();
   if (phoneNumber) {
     values.x_studio_phonenumber = phoneNumber;
+  }
+
+  if (
+    input.paymentMethodLineId !== undefined &&
+    Number.isFinite(input.paymentMethodLineId) &&
+    input.paymentMethodLineId > 0
+  ) {
+    values.preferred_payment_method_line_id = input.paymentMethodLineId;
   }
 
   const quotationId = await createOdooRecord(session, 'sale.order', values);
@@ -692,6 +701,52 @@ export async function fetchOdooQuotationById(
   );
 
   return summary;
+}
+
+export async function fetchOdooPaymentMethodLines(
+  userId: string,
+): Promise<{ id: number; name: string }[]> {
+  const session = getOdooSession(userId);
+
+  if (!session) {
+    throw new Error('Odoo session expired. Please log in again.');
+  }
+
+  const rows = await searchReadOdooRecords<{
+    id: number;
+    name: string | false;
+    payment_method_id: [number, string] | false;
+    journal_id: [number, string] | false;
+  }>(
+    session,
+    'account.payment.method.line',
+    [],
+    ['id', 'name', 'payment_method_id', 'journal_id'],
+    { order: 'journal_id asc', limit: 500 },
+  );
+
+  const seen = new Map<string, number>();
+
+  return rows
+    .map(row => {
+      const journal = odooRelationLabel(row.journal_id);
+      const methodName =
+        odooString(row.name) || odooRelationLabel(row.payment_method_id);
+      let label = journal || methodName || `Payment method ${row.id}`;
+
+      if (journal && methodName && journal !== methodName) {
+        label = journal;
+      }
+
+      const count = seen.get(label) ?? 0;
+      seen.set(label, count + 1);
+      if (count > 0) {
+        label = `${label} (#${row.id})`;
+      }
+
+      return { id: row.id, name: label };
+    })
+    .filter(row => row.name);
 }
 
 function odooString(value: unknown): string {

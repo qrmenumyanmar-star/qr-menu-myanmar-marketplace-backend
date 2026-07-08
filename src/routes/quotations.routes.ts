@@ -4,6 +4,7 @@ import { authMiddleware } from '../middleware/auth.js';
 import {
   createOdooQuotation,
   fetchOdooPartnerAddress,
+  fetchOdooPaymentMethodLines,
   fetchOdooQuotationById,
   fetchOdooQuotationLines,
   fetchOdooQuotations,
@@ -61,6 +62,22 @@ function mapQuotationSummary(quotation: {
 
 router.use(authMiddleware);
 
+router.get('/payment-methods', async (req: AuthRequest, res) => {
+  try {
+    const methods = await fetchOdooPaymentMethodLines(req.user!.id);
+    const data = methods.map(method => ({
+      id: String(method.id),
+      name: method.name,
+    }));
+    return res.json({ data });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to load payment methods.';
+    console.error('[quotations] Failed to load payment methods:', message);
+    return res.status(500).json({ message });
+  }
+});
+
 router.get('/', async (req: AuthRequest, res) => {
   try {
     const quotations = await fetchOdooQuotations(req.user!.id);
@@ -80,6 +97,7 @@ router.post('/', async (req: AuthRequest, res) => {
     deliveryNote?: string;
     preferredDeliveryDate?: string;
     phoneNumber?: string;
+    paymentMethodLineId?: string;
     lines?: {
       productId?: string;
       quantity?: number;
@@ -89,6 +107,7 @@ router.post('/', async (req: AuthRequest, res) => {
   };
 
   const partnerId = Number(body.customerId);
+  const paymentMethodLineId = Number(body.paymentMethodLineId);
   const lines = Array.isArray(body.lines) ? body.lines : [];
 
   if (!Number.isFinite(partnerId) || partnerId <= 0) {
@@ -126,6 +145,10 @@ router.post('/', async (req: AuthRequest, res) => {
       deliveryNotes: toStringValue(body.deliveryNote),
       preferredDeliveryDate: toStringValue(body.preferredDeliveryDate),
       phoneNumber: toStringValue(body.phoneNumber),
+      paymentMethodLineId:
+        Number.isFinite(paymentMethodLineId) && paymentMethodLineId > 0
+          ? paymentMethodLineId
+          : undefined,
       lines: parsedLines,
     });
 
