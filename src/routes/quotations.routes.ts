@@ -49,6 +49,7 @@ function mapQuotationSummary(quotation: {
   partner_id: [number, string] | false;
   amount_total: number;
   state: string;
+  preferred_payment_method_line_id?: [number, string] | false;
 }) {
   return {
     id: String(quotation.id),
@@ -57,6 +58,7 @@ function mapQuotationSummary(quotation: {
     customer: toRelationName(quotation.partner_id),
     total: toNumberValue(quotation.amount_total),
     status: toStringValue(quotation.state),
+    paymentMethod: toRelationName(quotation.preferred_payment_method_line_id),
   };
 }
 
@@ -80,8 +82,27 @@ router.get('/payment-methods', async (req: AuthRequest, res) => {
 
 router.get('/', async (req: AuthRequest, res) => {
   try {
-    const quotations = await fetchOdooQuotations(req.user!.id);
-    const data = quotations.map(mapQuotationSummary);
+    const [quotations, paymentMethods] = await Promise.all([
+      fetchOdooQuotations(req.user!.id),
+      fetchOdooPaymentMethodLines(req.user!.id),
+    ]);
+
+    const paymentMethodById = new Map(
+      paymentMethods.map(method => [method.id, method.name]),
+    );
+
+    const data = quotations.map(quotation => {
+      const lineId = toRelationId(quotation.preferred_payment_method_line_id);
+      const paymentMethod =
+        (lineId > 0 ? paymentMethodById.get(lineId) : '') ||
+        toRelationName(quotation.preferred_payment_method_line_id);
+
+      return {
+        ...mapQuotationSummary(quotation),
+        paymentMethod,
+      };
+    });
+
     return res.json({ data });
   } catch (error) {
     const message =
@@ -118,6 +139,17 @@ router.post('/', async (req: AuthRequest, res) => {
     return res.status(400).json({ message: 'Add at least one product before saving.' });
   }
 
+  const preferredDeliveryDate = toStringValue(body.preferredDeliveryDate).trim();
+  const deliveryNote = toStringValue(body.deliveryNote).trim();
+
+  if (!preferredDeliveryDate) {
+    return res.status(400).json({ message: 'Preferred delivery date is required.' });
+  }
+
+  if (!deliveryNote) {
+    return res.status(400).json({ message: 'Delivery notes are required.' });
+  }
+
   const parsedLines = lines.map((line, index) => {
     const productId = Number(line.productId);
     const quantity = toNumberValue(line.quantity);
@@ -142,8 +174,8 @@ router.post('/', async (req: AuthRequest, res) => {
   try {
     const created = await createOdooQuotation(req.user!.id, {
       partnerId,
-      deliveryNotes: toStringValue(body.deliveryNote),
-      preferredDeliveryDate: toStringValue(body.preferredDeliveryDate),
+      deliveryNotes: deliveryNote,
+      preferredDeliveryDate,
       phoneNumber: toStringValue(body.phoneNumber),
       paymentMethodLineId:
         Number.isFinite(paymentMethodLineId) && paymentMethodLineId > 0

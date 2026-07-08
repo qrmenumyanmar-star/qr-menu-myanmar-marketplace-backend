@@ -305,6 +305,7 @@ export type OdooQuotation = {
   partner_id: [number, string] | false;
   amount_total: number;
   state: string;
+  preferred_payment_method_line_id?: [number, string] | false;
 };
 
 export type OdooQuotationDetail = OdooQuotation & {
@@ -365,6 +366,7 @@ const QUOTATION_LIST_FIELDS = [
   'partner_id',
   'amount_total',
   'state',
+  'preferred_payment_method_line_id',
 ];
 
 const QUOTATION_DETAIL_FIELDS = [
@@ -712,41 +714,55 @@ export async function fetchOdooPaymentMethodLines(
     throw new Error('Odoo session expired. Please log in again.');
   }
 
-  const rows = await searchReadOdooRecords<{
+  let rows: {
     id: number;
     name: string | false;
     payment_method_id: [number, string] | false;
     journal_id: [number, string] | false;
-  }>(
-    session,
-    'account.payment.method.line',
-    [],
-    ['id', 'name', 'payment_method_id', 'journal_id'],
-    { order: 'journal_id asc', limit: 500 },
+    payment_type: string | false;
+  }[] = [];
+
+  try {
+    rows = await searchReadOdooRecords(
+      session,
+      'account.payment.method.line',
+      [['payment_type', '=', 'inbound']],
+      ['id', 'name', 'payment_method_id', 'journal_id', 'payment_type'],
+      { order: 'journal_id asc, id asc', limit: 500 },
+    );
+  } catch {
+    rows = await searchReadOdooRecords(
+      session,
+      'account.payment.method.line',
+      [],
+      ['id', 'name', 'payment_method_id', 'journal_id', 'payment_type'],
+      { order: 'journal_id asc, id asc', limit: 500 },
+    );
+  }
+
+  const byJournal = new Map<number, { id: number; name: string }>();
+
+  for (const row of rows) {
+    if (row.payment_type && row.payment_type !== 'inbound') {
+      continue;
+    }
+
+    const journalId = odooRelationId(row.journal_id);
+    if (!journalId || byJournal.has(journalId)) {
+      continue;
+    }
+
+    const journal = odooRelationLabel(row.journal_id);
+    const methodName =
+      odooString(row.name) || odooRelationLabel(row.payment_method_id);
+    const name = journal || methodName || `Payment method ${row.id}`;
+
+    byJournal.set(journalId, { id: row.id, name });
+  }
+
+  return Array.from(byJournal.values()).sort((a, b) =>
+    a.name.localeCompare(b.name),
   );
-
-  const seen = new Map<string, number>();
-
-  return rows
-    .map(row => {
-      const journal = odooRelationLabel(row.journal_id);
-      const methodName =
-        odooString(row.name) || odooRelationLabel(row.payment_method_id);
-      let label = journal || methodName || `Payment method ${row.id}`;
-
-      if (journal && methodName && journal !== methodName) {
-        label = journal;
-      }
-
-      const count = seen.get(label) ?? 0;
-      seen.set(label, count + 1);
-      if (count > 0) {
-        label = `${label} (#${row.id})`;
-      }
-
-      return { id: row.id, name: label };
-    })
-    .filter(row => row.name);
 }
 
 function odooString(value: unknown): string {
