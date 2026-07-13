@@ -6,6 +6,7 @@ import {
   createOdooContact,
   fetchOdooContactById,
   fetchOdooContacts,
+  fetchOdooPartnerAddressOptions,
   fetchOdooPartnerCategoryNames,
   fetchOdooPartnerTags,
   fetchOdooTownshipForPartner,
@@ -98,12 +99,23 @@ router.get('/townships', async (req: AuthRequest, res) => {
   try {
     const townships = await fetchOdooTownships(req.user!.id);
 
+    const seen = new Set<string>();
     const data = townships
       .map(township => ({
         id: String(township.id),
-        name: toStringValue(township.x_name),
+        name: toStringValue(township.x_name).replace(/\s+/g, ' ').trim(),
       }))
-      .filter(township => township.name);
+      .filter(township => {
+        if (!township.name) {
+          return false;
+        }
+        const key = township.name.toLowerCase();
+        if (seen.has(key)) {
+          return false;
+        }
+        seen.add(key);
+        return true;
+      });
 
     return res.json({ data });
   } catch (error) {
@@ -151,6 +163,11 @@ router.get('/search', async (req: AuthRequest, res) => {
       street2: toStringValue(contact.street2),
       city: toStringValue(contact.city),
       township: toRelationName(contact.x_studio_many2one_field_8u9_1jp4l7r0g),
+      parentId: toRelationId(contact.parent_id)
+        ? String(toRelationId(contact.parent_id))
+        : null,
+      isCompany: Boolean(contact.is_company),
+      type: toStringValue(contact.type) || 'contact',
     }));
 
     return res.json({ data });
@@ -286,6 +303,153 @@ router.post('/', async (req: AuthRequest, res) => {
     const message =
       error instanceof Error ? error.message : 'Failed to create contact.';
     console.error('[customers] Failed to create contact:', message);
+    return res.status(500).json({ message });
+  }
+});
+
+router.get('/:id/addresses', async (req: AuthRequest, res) => {
+  const contactId = Number(req.params.id);
+
+  if (!Number.isFinite(contactId) || contactId <= 0) {
+    return res.status(400).json({ message: 'Invalid contact id.' });
+  }
+
+  try {
+    const result = await fetchOdooPartnerAddressOptions(req.user!.id, contactId);
+
+    return res.json({
+      data: {
+        companyId: String(result.companyId),
+        companyName: result.companyName,
+        defaultAddressId: String(result.defaultAddressId),
+        company: {
+          id: String(result.company.id),
+          name: result.company.name,
+          phone: result.company.phone,
+          street: result.company.street,
+          street2: result.company.street2,
+          city: result.company.city,
+          township: result.company.township,
+          parentId: result.company.parentId ? String(result.company.parentId) : null,
+          isCompany: result.company.isCompany,
+          isMain: result.company.isMain,
+          type: result.company.type,
+          label: result.company.label,
+        },
+        addresses: result.addresses.map(address => ({
+          id: String(address.id),
+          name: address.name,
+          phone: address.phone,
+          street: address.street,
+          street2: address.street2,
+          city: address.city,
+          township: address.township,
+          parentId: address.parentId ? String(address.parentId) : null,
+          isCompany: address.isCompany,
+          isMain: address.isMain,
+          type: address.type,
+          label: address.label,
+        })),
+      },
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to load delivery addresses.';
+    console.error('[customers] Failed to load addresses:', message);
+    return res.status(500).json({ message });
+  }
+});
+
+router.post('/:id/addresses', async (req: AuthRequest, res) => {
+  const parentId = Number(req.params.id);
+  const name = toStringValue(req.body?.name).trim();
+  const phoneRaw = toStringValue(req.body?.phone).trim();
+  const street = toStringValue(req.body?.street).trim();
+  const street2 = toStringValue(req.body?.street2).trim();
+  const townshipId = Number(req.body?.townshipId);
+
+  if (!Number.isFinite(parentId) || parentId <= 0) {
+    return res.status(400).json({ message: 'Invalid company id.' });
+  }
+
+  if (!name) {
+    return res.status(400).json({ message: 'Address name is required.' });
+  }
+
+  if (!Number.isFinite(townshipId) || townshipId <= 0) {
+    return res.status(400).json({ message: 'Township is required.' });
+  }
+
+  let phone = phoneRaw;
+  if (phoneRaw) {
+    try {
+      phone = validateMyanmarPhone(phoneRaw, 'Phone number');
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Invalid phone number.';
+      return res.status(400).json({ message });
+    }
+  }
+
+  try {
+    const created = await createOdooContact(req.user!.id, {
+      name,
+      phone: phone || undefined,
+      street: street || undefined,
+      street2: street2 || undefined,
+      townshipId,
+      parentId,
+      type: 'delivery',
+    });
+
+    const result = await fetchOdooPartnerAddressOptions(req.user!.id, parentId);
+    const createdAddress =
+      result.addresses.find(address => address.id === created.id) ?? null;
+
+    return res.status(201).json({
+      data: {
+        id: String(created.id),
+        name: created.name,
+        address: createdAddress
+          ? {
+              id: String(createdAddress.id),
+              name: createdAddress.name,
+              phone: createdAddress.phone,
+              street: createdAddress.street,
+              street2: createdAddress.street2,
+              city: createdAddress.city,
+              township: createdAddress.township,
+              parentId: createdAddress.parentId
+                ? String(createdAddress.parentId)
+                : null,
+              isCompany: createdAddress.isCompany,
+              isMain: createdAddress.isMain,
+              type: createdAddress.type,
+              label: createdAddress.label,
+            }
+          : null,
+        companyId: String(result.companyId),
+        defaultAddressId: String(created.id),
+        addresses: result.addresses.map(address => ({
+          id: String(address.id),
+          name: address.name,
+          phone: address.phone,
+          street: address.street,
+          street2: address.street2,
+          city: address.city,
+          township: address.township,
+          parentId: address.parentId ? String(address.parentId) : null,
+          isCompany: address.isCompany,
+          isMain: address.isMain,
+          type: address.type,
+          label: address.label,
+        })),
+      },
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : 'Failed to create delivery address.';
+    console.error('[customers] Failed to create address:', message);
     return res.status(500).json({ message });
   }
 });

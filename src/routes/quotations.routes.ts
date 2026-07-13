@@ -115,6 +115,8 @@ router.get('/', async (req: AuthRequest, res) => {
 router.post('/', async (req: AuthRequest, res) => {
   const body = req.body as {
     customerId?: string;
+    shippingPartnerId?: string;
+    salePersonName?: string;
     deliveryNote?: string;
     preferredDeliveryDate?: string;
     phoneNumber?: string;
@@ -128,6 +130,7 @@ router.post('/', async (req: AuthRequest, res) => {
   };
 
   const partnerId = Number(body.customerId);
+  const shippingPartnerId = Number(body.shippingPartnerId);
   const paymentMethodLineId = Number(body.paymentMethodLineId);
   const lines = Array.isArray(body.lines) ? body.lines : [];
 
@@ -148,6 +151,11 @@ router.post('/', async (req: AuthRequest, res) => {
 
   if (!deliveryNote) {
     return res.status(400).json({ message: 'Delivery notes are required.' });
+  }
+
+  const salePersonName = toStringValue(body.salePersonName).trim();
+  if (!salePersonName) {
+    return res.status(400).json({ message: 'Sale person name is required.' });
   }
 
   const parsedLines = lines.map((line, index) => {
@@ -174,6 +182,11 @@ router.post('/', async (req: AuthRequest, res) => {
   try {
     const created = await createOdooQuotation(req.user!.id, {
       partnerId,
+      shippingPartnerId:
+        Number.isFinite(shippingPartnerId) && shippingPartnerId > 0
+          ? shippingPartnerId
+          : partnerId,
+      salePersonName,
       deliveryNotes: deliveryNote,
       preferredDeliveryDate,
       phoneNumber: toStringValue(body.phoneNumber),
@@ -252,6 +265,10 @@ router.get('/:id', async (req: AuthRequest, res) => {
 
     const data = {
       ...mapQuotationSummary(quotation),
+      customerId: String(toRelationId(quotation.partner_id) || ''),
+      paymentMethodLineId: String(
+        toRelationId(quotation.preferred_payment_method_line_id) || '',
+      ),
       deliveryAddress,
       invoiceAddress: toRelationName(quotation.partner_invoice_id),
       expiration: toStringValue(quotation.validity_date),
@@ -272,6 +289,7 @@ router.get('/:id', async (req: AuthRequest, res) => {
       deliveryNotes: toStringValue(quotation.x_studio_delivery_notes),
       lines: lines.map(line => ({
         id: String(line.id),
+        productId: String(toRelationId(line.product_id) || ''),
         product:
           toRelationName(line.product_id) || toStringValue(line.name) || '—',
         quantity: toNumberValue(line.product_uom_qty),

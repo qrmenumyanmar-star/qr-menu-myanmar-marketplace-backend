@@ -93,6 +93,7 @@ export function jsonBodyParser(req: Request, res: Response, next: NextFunction) 
   }
 
   express.json({
+    limit: '10mb',
     type: ['application/json', 'application/*+json', 'text/json', '*/*'],
   })(req, res, next);
 }

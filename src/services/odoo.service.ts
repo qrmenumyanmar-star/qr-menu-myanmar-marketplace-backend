@@ -521,6 +521,8 @@ export type CreateQuotationLineInput = {
 
 export type CreateQuotationInput = {
   partnerId: number;
+  shippingPartnerId?: number;
+  salePersonName?: string;
   deliveryNotes?: string;
   preferredDeliveryDate?: string;
   phoneNumber?: string;
@@ -557,10 +559,17 @@ export async function createOdooQuotation(
     },
   ]);
 
+  const shippingPartnerId =
+    input.shippingPartnerId !== undefined &&
+    Number.isFinite(input.shippingPartnerId) &&
+    input.shippingPartnerId > 0
+      ? input.shippingPartnerId
+      : input.partnerId;
+
   const values: Record<string, unknown> = {
     partner_id: input.partnerId,
     partner_invoice_id: input.partnerId,
-    partner_shipping_id: input.partnerId,
+    partner_shipping_id: shippingPartnerId,
     order_line: orderLineCommands,
   };
 
@@ -577,6 +586,11 @@ export async function createOdooQuotation(
   const phoneNumber = input.phoneNumber?.trim();
   if (phoneNumber) {
     values.x_studio_phonenumber = phoneNumber;
+  }
+
+  const salePersonName = input.salePersonName?.trim();
+  if (salePersonName) {
+    values.x_studio_sale_person_name = salePersonName;
   }
 
   if (
@@ -866,6 +880,8 @@ export type CreateContactInput = {
   townshipId?: number;
   tagIds?: number[];
   tagNames?: string[];
+  parentId?: number;
+  type?: 'contact' | 'delivery' | 'invoice' | 'other';
 };
 
 export async function fetchOdooPartnerTags(
@@ -941,6 +957,9 @@ export type OdooContactSearchResult = {
   street: string | false;
   street2: string | false;
   city: string | false;
+  is_company: boolean;
+  parent_id: [number, string] | false;
+  type: string | false;
   x_studio_many2one_field_8u9_1jp4l7r0g: [number, string] | false;
 };
 
@@ -971,6 +990,9 @@ export async function searchOdooContactsByPhone(
       'street',
       'street2',
       'city',
+      'is_company',
+      'parent_id',
+      'type',
       PARTNER_TOWNSHIP_FIELD,
     ],
     { limit: 20, order: 'name asc' },
@@ -1009,7 +1031,12 @@ export async function createOdooContact(
   }
 
   const phone = input.phone?.trim();
-  if (phone) {
+  const isChildAddress =
+    input.parentId !== undefined &&
+    Number.isFinite(input.parentId) &&
+    input.parentId > 0;
+
+  if (phone && !isChildAddress) {
     const existing = await searchOdooContactsByPhone(userId, phone);
     if (existing.length > 0) {
       throw new Error(
@@ -1020,8 +1047,13 @@ export async function createOdooContact(
 
   const values: Record<string, unknown> = {
     name,
-    customer_rank: 1,
+    customer_rank: isChildAddress ? 0 : 1,
   };
+
+  if (isChildAddress) {
+    values.parent_id = input.parentId;
+    values.type = input.type ?? 'delivery';
+  }
 
   const email = input.email?.trim();
   if (email) {
@@ -1064,6 +1096,163 @@ export async function createOdooContact(
   return {
     id: contactId,
     name,
+  };
+}
+
+export type PartnerAddressOption = {
+  id: number;
+  name: string;
+  phone: string;
+  street: string;
+  street2: string;
+  city: string;
+  township: string;
+  parentId: number | null;
+  isCompany: boolean;
+  isMain: boolean;
+  type: string;
+  label: string;
+};
+
+type OdooAddressPartner = {
+  id: number;
+  name: string;
+  phone: string | false;
+  street: string | false;
+  street2: string | false;
+  city: string | false;
+  is_company: boolean;
+  parent_id: [number, string] | false;
+  type: string | false;
+  x_studio_many2one_field_8u9_1jp4l7r0g: [number, string] | false;
+};
+
+const ADDRESS_PARTNER_FIELDS = [
+  'id',
+  'name',
+  'phone',
+  'street',
+  'street2',
+  'city',
+  'is_company',
+  'parent_id',
+  'type',
+  PARTNER_TOWNSHIP_FIELD,
+];
+
+function buildAddressLabel(partner: OdooAddressPartner, township: string, isMain: boolean): string {
+  const place = [township, odooString(partner.city), odooString(partner.street)]
+    .filter(Boolean)
+    .join(' · ');
+  const name = odooString(partner.name) || (isMain ? 'Main address' : 'Address');
+  if (isMain) {
+    return place ? `Main · ${name} (${place})` : `Main · ${name}`;
+  }
+  return place ? `${name} (${place})` : name;
+}
+
+async function mapAddressOption(
+  userId: string,
+  partner: OdooAddressPartner,
+  isMain: boolean,
+): Promise<PartnerAddressOption> {
+  const townshipRecord = await fetchOdooTownshipForPartner(userId, partner);
+  const location = resolvePartnerLocation(partner, townshipRecord);
+  const township = location.township;
+  const type = odooString(partner.type) || (isMain ? 'contact' : 'delivery');
+
+  return {
+    id: partner.id,
+    name: odooString(partner.name),
+    phone: odooString(partner.phone),
+    street: odooString(partner.street),
+    street2: odooString(partner.street2),
+    city: location.city,
+    township,
+    parentId: odooRelationId(partner.parent_id) || null,
+    isCompany: Boolean(partner.is_company),
+    isMain,
+    type,
+    label: buildAddressLabel(partner, township, isMain),
+  };
+}
+
+export async function fetchOdooPartnerAddressOptions(
+  userId: string,
+  partnerId: number,
+): Promise<{
+  companyId: number;
+  companyName: string;
+  company: PartnerAddressOption;
+  defaultAddressId: number;
+  addresses: PartnerAddressOption[];
+}> {
+  if (!Number.isFinite(partnerId) || partnerId <= 0) {
+    throw new Error('A valid customer is required.');
+  }
+
+  const session = getOdooSession(userId);
+  if (!session) {
+    throw new Error('Odoo session expired. Please log in again.');
+  }
+
+  const selected = await readOdooRecord<OdooAddressPartner>(
+    session,
+    'res.partner',
+    partnerId,
+    ADDRESS_PARTNER_FIELDS,
+  );
+
+  if (!selected) {
+    throw new Error('Contact not found.');
+  }
+
+  const parentId = odooRelationId(selected.parent_id);
+  const companyId = parentId || selected.id;
+
+  const company =
+    companyId === selected.id
+      ? selected
+      : await readOdooRecord<OdooAddressPartner>(
+          session,
+          'res.partner',
+          companyId,
+          ADDRESS_PARTNER_FIELDS,
+        );
+
+  if (!company) {
+    throw new Error('Company contact not found.');
+  }
+
+  const children = await searchReadOdooRecords<OdooAddressPartner>(
+    session,
+    'res.partner',
+    [['parent_id', '=', companyId]],
+    ADDRESS_PARTNER_FIELDS,
+    { order: 'name asc', limit: 200 },
+  );
+
+  const deliveryChildren = children.filter(child => {
+    const type = odooString(child.type).toLowerCase();
+    return !type || type === 'delivery' || type === 'other' || type === 'contact';
+  });
+
+  const companyOption = await mapAddressOption(userId, company, true);
+  const childOptions = await Promise.all(
+    deliveryChildren.map(child => mapAddressOption(userId, child, false)),
+  );
+
+  const addresses = [companyOption, ...childOptions];
+  const defaultAddressId = addresses.some(item => item.id === partnerId)
+    ? partnerId
+    : companyId;
+
+  return {
+    companyId,
+    companyName: companyOption.name,
+    company: companyOption,
+    defaultAddressId,
+    addresses,
   };
 }
 
